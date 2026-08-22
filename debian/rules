@@ -29,7 +29,7 @@ BLD         := $(CURDIR)/build-tree/build
 STAMP       := $(CURDIR)/build-tree/stamps
 PKG         := $(CURDIR)/debian/liblol
 
-CFLAGS_COMMON  := -O2 -march=la64v1.1 -mtune=la664 -g -ffile-prefix-map=$(CURDIR)/build-tree=.
+CFLAGS_COMMON  := -O2 -march=la64v1.0 -mtune=la664 -g -ffile-prefix-map=$(CURDIR)/build-tree=.
 LDFLAGS_COMMON := -Wl,-O1,--sort-common,--as-needed -Wl,-build-id=sha1
 
 # Remap old-world symbol versions onto the LoongArch (new-world) glibc
