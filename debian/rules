@@ -1,0 +1,290 @@
+#!/usr/bin/make -f
+# -*- makefile -*-
+# debian/rules for liblol — builds the libLoL (LoongArch on LoongArch)
+# user-space runtime from the GNU C Library sources patched with the
+# libLoL old-world ABI compatibility series, and packages it as the
+# `liblol` Debian binary package.
+#
+# This replaces the glibc packaging rules: no libc6/libc-bin/locales/
+# etc. are built.  Only the old-world runtimes shipped below
+# /usr/lib/loongarch64-debian-linux-gnuow/preload/ are produced,
+# following the layout documented at <https://liblol.aosc.io/docs/usage/>
+# for Debian and matching the official liblol_*_loong64.deb binaries.
+
+DEB_HOST_MULTIARCH := $(shell dpkg-architecture -qDEB_HOST_MULTIARCH)
+ifeq ($(DEB_HOST_MULTIARCH),)
+$(error dpkg-architecture failed; is dpkg-dev installed?)
+endif
+
+OWTARGET    := loongarch64-debian-linux-gnuow
+OWPRELOAD   := /usr/lib/$(OWTARGET)/preload
+OWBUILD     := $(shell dpkg-architecture -qDEB_BUILD_GNU_TYPE)
+
+UPSTREAM    := $(shell dpkg-parsechangelog -SVersion | sed 's/-[^-]*$$//')
+DEB_VERSION := $(shell dpkg-parsechangelog -SVersion)
+ORIG_TAR    := $(CURDIR)/../liblol_$(UPSTREAM).orig.tar.xz
+
+SRC         := $(CURDIR)/build-tree/src
+BLD         := $(CURDIR)/build-tree/build
+STAMP       := $(CURDIR)/build-tree/stamps
+PKG         := $(CURDIR)/debian/liblol
+
+CFLAGS_COMMON  := -O2 -march=la64v1.1 -mtune=la664 -g -ffile-prefix-map=$(CURDIR)/build-tree=.
+LDFLAGS_COMMON := -Wl,-O1,--sort-common,--as-needed -Wl,-build-id=sha1
+
+# Remap old-world symbol versions onto the LoongArch (new-world) glibc
+# version nodes so that old-world binaries resolve against this runtime.
+LIBC_MAP    := GLIBC_2.36=GLIBC_2.27,GLIBC_2.28
+PTHREAD_MAP := GLIBC_2.27=GLIBC_2.0,GLIBC_2.2,GLIBC_2.2.1,GLIBC_2.2.2,GLIBC_2.2.3,GLIBC_2.2.4,GLIBC_2.2.6,GLIBC_2.3,GLIBC_2.3.2,GLIBC_2.3.3,GLIBC_2.3.4,GLIBC_2.4,GLIBC_2.5,GLIBC_2.6,GLIBC_2.7,GLIBC_2.8,GLIBC_2.9,GLIBC_2.10,GLIBC_2.11,GLIBC_2.12,GLIBC_2.13,GLIBC_2.14,GLIBC_2.15,GLIBC_2.16,GLIBC_2.17,GLIBC_2.18,GLIBC_2.19,GLIBC_2.20,GLIBC_2.21,GLIBC_2.22,GLIBC_2.23,GLIBC_2.24,GLIBC_2.25,GLIBC_2.26
+
+# Third-party sources fetched during the build (cached in ../downloads).
+DLDIR      := $(CURDIR)/../downloads
+PAT_TAR    := $(DLDIR)/patchelf-0.18.0.tar.gz
+XCRYPT_TAR := $(DLDIR)/libxcrypt-4.5.2.tar.xz
+PAT_URL    := https://github.com/NixOS/patchelf/releases/download/0.18.0/patchelf-0.18.0.tar.gz
+XCRYPT_URL := https://github.com/besser82/libxcrypt/releases/download/v4.5.2/libxcrypt-4.5.2.tar.xz
+PAT_PATCH  := $(CURDIR)/debian/patchelf-remap-symvers.patch
+
+NJOBS := $(shell printf '%s' "$(DEB_BUILD_OPTIONS)" | tr ' ,' '\n' | awk -F= '/^parallel=/{print $$2}')
+ifeq ($(strip $(NJOBS)),)
+NJOBS := $(shell nproc)
+endif
+
+OW_BUILD_LIBS := \
+	nptl/libpthread.so.0 \
+	elf/ld.so.1 \
+	math/libm.so.6 \
+	resolv/libresolv.so.2 \
+	malloc/libc_malloc_debug.so.0 \
+	nptl_db/libthread_db.so.1 \
+	locale/libBrokenLocale.so.1 \
+	resolv/libanl.so.1 \
+	dlfcn/libdl.so.2 \
+	rt/librt.so.1 \
+	login/libutil.so.1 \
+	nis/libnsl.so.1
+
+OW_REMAP_LIBS := \
+	elf/ld.so.1 \
+	math/libm.so.6 \
+	resolv/libresolv.so.2 \
+	malloc/libc_malloc_debug.so.0 \
+	nptl_db/libthread_db.so.1 \
+	locale/libBrokenLocale.so.1
+
+OW_INSTALL_LIBS := \
+	libc.so.6 \
+	ld-linux-loongarch-lp64d.so.1 \
+	elf/ld.so.1 \
+	nptl/libpthread.so.0 \
+	math/libm.so.6 \
+	resolv/libresolv.so.2 \
+	malloc/libc_malloc_debug.so.0 \
+	nptl_db/libthread_db.so.1 \
+	locale/libBrokenLocale.so.1 \
+	resolv/libanl.so.1 \
+	dlfcn/libdl.so.2 \
+	rt/librt.so.1 \
+	login/libutil.so.1 \
+	nis/libnsl.so.1
+
+.PHONY: clean build build-arch build-indep binary binary-arch binary-indep
+
+build: build-arch
+build-arch:
+build-indep:
+binary: binary-arch
+binary-indep:
+
+clean:
+	rm -rf $(CURDIR)/build-tree $(PKG)
+
+$(STAMP)/src: $(ORIG_TAR) $(CURDIR)/debian/patches/series \
+		$(wildcard $(CURDIR)/debian/patches/liblol/*.patch)
+	rm -rf $(SRC)/glibc
+	@mkdir -p $(SRC)/glibc $(STAMP)
+	tar -xJf $(ORIG_TAR) -C $(SRC)/glibc --strip-components=1
+	@set -e; i=0; while read -r p; do \
+		case "$$p" in \#*|"") continue;; esac; \
+		i=$$((i+1)); \
+		echo "Applying libLoL patch $$i: $$p"; \
+		patch -p1 -f --ignore-whitespace -d "$(SRC)/glibc" \
+			< "$(CURDIR)/debian/patches/$$p" || exit 1; \
+	done < "$(CURDIR)/debian/patches/series"
+	touch $@
+
+$(ORIG_TAR):
+	@echo "ERROR: upstream tarball $(ORIG_TAR) not found." >&2; \
+	echo "Get glibc-$(UPSTREAM).tar.xz from https://ftp.gnu.org/gnu/glibc/ and" >&2; \
+	echo "place it (renamed) at $(ORIG_TAR)." >&2; \
+	exit 1
+
+$(PAT_TAR):
+	@mkdir -p $(DLDIR)
+	curl -fL --retry 3 -o $@ $(PAT_URL)
+
+$(STAMP)/patchelf: $(PAT_TAR) $(PAT_PATCH)
+	rm -rf $(SRC)/patchelf $(BLD)/patchelf
+	@mkdir -p $(SRC)/patchelf $(BLD)/patchelf $(STAMP)
+	tar -xzf $(PAT_TAR) -C $(SRC)/patchelf --strip-components=1
+	patch -p1 -f --ignore-whitespace -d "$(SRC)/patchelf" < "$(PAT_PATCH)"
+	cd "$(BLD)/patchelf" && "$(SRC)/patchelf/configure"
+	make -C "$(BLD)/patchelf" -j$(NJOBS)
+	touch $@
+
+$(BLD)/glibc/config.status: $(STAMP)/src
+	@mkdir -p $(BLD)/glibc
+	@cd "$(BLD)/glibc" && printf '%s\n' \
+		'install_root = $$(DESTDIR)' \
+		'exec_prefix = $${prefix}' \
+		'datarootdir = /usr/share' \
+		'libdir = $${exec_prefix}/lib' \
+		'slibdir = $${exec_prefix}/lib' \
+		'extra_libdir = $${exec_prefix}/lib' \
+		'rtlddir = /lib64' \
+		'libexecdir = $${exec_prefix}/lib' \
+		'rootsbindir = $${exec_prefix}/sbin' \
+		'complocaledir = /usr/lib/locale' \
+		'localtime-file = /etc/localtime' \
+		'sysconfdir = /etc/liblol' \
+		'user-defined-trusted-dirs-pre = /usr/local/lib/$(OWTARGET)/preload /usr/lib/$(OWTARGET)/preload' \
+		'user-defined-trusted-dirs = /usr/local/lib/$(OWTARGET) /usr/lib/$(OWTARGET) /usr/lib/$(DEB_HOST_MULTIARCH)' \
+		'CFLAGS = -pipe $(CFLAGS_COMMON)' \
+		'ASFLAGS = -pipe $(CFLAGS_COMMON)' \
+		'BUILD_CFLAGS = $(CFLAGS_COMMON)' \
+		'LDFLAGS = $(LDFLAGS_COMMON)' \
+		> configparms
+	cd "$(BLD)/glibc" && env -i TERM="$$TERM" PATH="$(PATH)" \
+		"$(SRC)/glibc/configure" \
+			--target="$(OWTARGET)" \
+			--host="$(OWTARGET)" \
+			--build="$(OWBUILD)" \
+			--disable-werror \
+			--prefix=/usr \
+			--with-pkgversion="LibLoL $(DEB_VERSION)" \
+			--with-bugurl="https://github.com/AOSC-Dev/liblol/issues"
+
+$(STAMP)/glibc: $(BLD)/glibc/config.status $(STAMP)/patchelf
+	@set -e; cd "$(BLD)/glibc" && \
+	env -i MAKEFLAGS="-j$(NJOBS)" TERM="$$TERM" PATH="$(PATH)" \
+		make "$(BLD)/glibc/libc.so.6" && \
+	env -i MAKEFLAGS="-j$(NJOBS)" TERM="$$TERM" PATH="$(PATH)" \
+		make "$(BLD)/glibc/linkobj/libc.so" && \
+	"$(BLD)/patchelf/src/patchelf" --page-size "$$((64*1024))" \
+		--remap-symvers "$(PTHREAD_MAP)" --also-remap-verneed \
+		libc.so.6 && \
+	"$(BLD)/patchelf/src/patchelf" --page-size "$$((64*1024))" \
+		--remap-symvers "$(PTHREAD_MAP)" --also-remap-verneed \
+		linkobj/libc.so && \
+	"$(BLD)/patchelf/src/patchelf" --page-size "$$((64*1024))" \
+		--remap-symvers "$(LIBC_MAP)" --also-remap-verneed \
+		libc.so.6 && \
+	"$(BLD)/patchelf/src/patchelf" --page-size "$$((64*1024))" \
+		--remap-symvers "$(LIBC_MAP)" --also-remap-verneed \
+		linkobj/libc.so
+	@set -e; cd "$(BLD)/glibc" && \
+	for i in $(OW_BUILD_LIBS); do \
+		dir=$$(dirname -- "$$i"); \
+		echo "Building $$i ..."; \
+		env -i MAKEFLAGS="-j$(NJOBS)" TERM="$$TERM" PATH="$(PATH)" \
+			make -C "$(SRC)/glibc/$$dir" \
+				"$(BLD)/glibc/$$i" \
+				subdir="$$dir" ..=../ objdir="$(BLD)/glibc" \
+			|| exit 1; \
+	done
+	@set -e; cd "$(BLD)/glibc" && \
+	"$(BLD)/patchelf/src/patchelf" --page-size "$$((64*1024))" \
+		--remap-symvers "$(PTHREAD_MAP)" --also-remap-verneed \
+		nptl/libpthread.so.0 && \
+	for i in $(OW_REMAP_LIBS); do \
+		"$(BLD)/patchelf/src/patchelf" --page-size "$$((64*1024))" \
+			--remap-symvers "$(LIBC_MAP)" --also-remap-verneed \
+			"$$i" || exit 1; \
+	done
+	@cd "$(BLD)/glibc" && \
+	gcc -shared -x c /dev/null \
+		-o ld-linux-loongarch-lp64d.so.1 \
+		-Wl,--version-script -Wl,ld.map \
+		-nostdlib \
+		$(CFLAGS_COMMON) $(LDFLAGS_COMMON)
+	touch $@
+
+$(XCRYPT_TAR):
+	@mkdir -p $(DLDIR)
+	curl -fL --retry 3 -o $@ $(XCRYPT_URL)
+
+$(STAMP)/libxcrypt: $(XCRYPT_TAR) $(STAMP)/patchelf
+	rm -rf $(SRC)/libxcrypt $(BLD)/libxcrypt
+	@mkdir -p $(SRC)/libxcrypt $(BLD)/libxcrypt $(STAMP)
+	tar -xJf $(XCRYPT_TAR) -C $(SRC)/libxcrypt --strip-components=1
+	cd "$(BLD)/libxcrypt" && env -i TERM="$$TERM" PATH="$(PATH)" \
+		"$(SRC)/libxcrypt/configure" \
+			--prefix=/usr \
+			--host="$(OWTARGET)" \
+			--build="$(OWBUILD)" \
+			--disable-werror \
+			--enable-shared \
+			--disable-xcrypt-compat-files \
+			--enable-obsolete-api=glibc \
+			CFLAGS="$(CFLAGS_COMMON)" \
+			LDFLAGS="$(LDFLAGS_COMMON)"
+	cd "$(BLD)/libxcrypt" && rm -f crypt-symbol-vers.h crypt-symbol-vers.h.stamp
+	cd "$(BLD)/libxcrypt" && env -i MAKEFLAGS="-j$(NJOBS)" TERM="$$TERM" PATH="$(PATH)" \
+		make libcrypt.la SYMVER_FLOOR=GLIBC_2.27
+	@test -f "$(BLD)/libxcrypt/.libs/libcrypt.so.1" || \
+		{ echo "libcrypt.so.1 was not generated" >&2; exit 1; }
+	"$(BLD)/patchelf/src/patchelf" --page-size "$$((64*1024))" \
+		--remap-symvers "$(LIBC_MAP)" \
+		"$(BLD)/libxcrypt/.libs/libcrypt.so.1"
+	"$(BLD)/patchelf/src/patchelf" --page-size "$$((64*1024))" \
+		--replace-needed ld-linux-loongarch-lp64d.so.1 ld.so.1 \
+		"$(BLD)/libxcrypt/.libs/libcrypt.so.1"
+	touch $@
+
+$(STAMP)/assemble: $(STAMP)/glibc $(STAMP)/libxcrypt
+	@mkdir -p "$(PKG)$(OWPRELOAD)" "$(PKG)/usr/share/doc/liblol" \
+		"$(PKG)/DEBIAN"
+	@set -e; cd "$(BLD)/glibc" && \
+	for i in $(OW_INSTALL_LIBS); do \
+		install -Dvm644 "$$i" -t "$(PKG)$(OWPRELOAD)/" || exit 1; \
+	done
+	install -Dvm644 "$(BLD)/libxcrypt/.libs/libcrypt.so.1" \
+		-t "$(PKG)$(OWPRELOAD)/"
+	chmod 755 "$(PKG)$(OWPRELOAD)/ld.so.1" "$(PKG)$(OWPRELOAD)/libc.so.6"
+	ln -sf "../../loongarch64-linux-gnu/libstdc++.so.6" \
+		"$(PKG)$(OWPRELOAD)/libstdc++.so.6"
+	mkdir -p "$(PKG)/lib64"
+	ln -sf "/usr/lib/$(OWTARGET)/preload/ld.so.1" \
+		"$(PKG)/lib64/ld.so.1"
+	gzip -9n < "$(CURDIR)/debian/changelog" \
+		> "$(PKG)/usr/share/doc/liblol/changelog.Debian.gz"
+	install -Dvm644 "$(CURDIR)/debian/copyright" \
+		"$(PKG)/usr/share/doc/liblol/copyright"
+	touch $@
+
+$(STAMP)/deb: $(STAMP)/assemble
+	dpkg-gencontrol -pliblol -P"$(PKG)"
+	@printf '%s\n' \
+		'ld 1 liblol (>= $(UPSTREAM))' \
+		'libBrokenLocale 1 liblol (>= $(UPSTREAM))' \
+		'libanl 1 liblol (>= $(UPSTREAM))' \
+		'libc 6 liblol (>= $(UPSTREAM))' \
+		'libc_malloc_debug 0 liblol (>= $(UPSTREAM))' \
+		'libcrypt 1 liblol (>= $(UPSTREAM))' \
+		'libdl 2 liblol (>= $(UPSTREAM))' \
+		'libm 6 liblol (>= $(UPSTREAM))' \
+		'libnsl 1 liblol (>= $(UPSTREAM))' \
+		'libpthread 0 liblol (>= $(UPSTREAM))' \
+		'libresolv 2 liblol (>= $(UPSTREAM))' \
+		'librt 1 liblol (>= $(UPSTREAM))' \
+		'libthread_db 1 liblol (>= $(UPSTREAM))' \
+		'libutil 1 liblol (>= $(UPSTREAM))' \
+		> "$(PKG)/DEBIAN/shlibs"
+	@printf 'activate-noawait ldconfig\n' > "$(PKG)/DEBIAN/triggers"
+	cd "$(PKG)" && find usr -type f -print0 | xargs -0 md5sum \
+		> "$(PKG)/DEBIAN/md5sums"
+	dpkg-deb --root-owner-group --build "$(PKG)" \
+		"$(CURDIR)/../liblol_$(DEB_VERSION)_loong64.deb"
+	touch $@
+
+binary-arch: $(STAMP)/deb

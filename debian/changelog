@@ -1,0 +1,16 @@
+liblol (0.1.11-1) unstable; urgency=medium
+
+  * Initial Debian packaging of the libLoL (LoongArch on LoongArch)
+    user-space runtime.  The GNU C Library 2.43 sources (the upstream
+    tarball of this package) are built with the libLoL old-world ABI
+    compatibility patch series:
+    - debian/patches/liblol: old-world ABI symbol compatibility,
+      signal/pthread compatibility, syscall fallbacks and trusted
+      directory support.
+    - The patched runtimes are installed below
+      /usr/lib/loongarch64-debian-linux-gnuow/preload/ as documented at
+      <https://liblol.aosc.io/docs/usage/> for Debian.
+    - debian/rules and debian/control are rewritten for this package;
+      all other glibc packaging content has been dropped.
+
+ -- Mingcong Bai <jeffbai@aosc.io>  Sat, 22 Aug 2026 18:10:00 +0800

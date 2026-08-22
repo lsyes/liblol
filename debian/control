@@ -1,0 +1,35 @@
+Source: liblol
+Section: otherosfs
+Priority: optional
+Maintainer: Mingcong Bai <jeffbai@aosc.io>
+Build-Depends: build-essential, dpkg-dev, fakeroot,
+ xz-utils, patch, curl, python3, linux-libc-dev,
+ file
+Standards-Version: 4.6.2
+Rules-Requires-Root: no
+Homepage: https://github.com/AOSC-Dev/liblol
+Vcs-Browser: https://github.com/AOSC-Dev/liblol
+Vcs-Git: https://github.com/AOSC-Dev/liblol.git
+
+Package: liblol
+Architecture: loong64
+Section: otherosfs
+Priority: optional
+Multi-Arch: foreign
+Depends: libstdc++6, libc6 (>= 2.36), libc6 (<< 2.43.1)
+Recommends: liblol-dkms
+Conflicts: glibc
+Breaks: libcrypt1 (>= 1:4.5.2.1~)
+Homepage: https://github.com/AOSC-Dev/liblol
+Description: Compatibility layer for old world applications
+ This package contains a Compatibility layer for old world
+ applications on new world loongarch64 platform.
+ .
+ libLoL (LoongArch on LoongArch) provides a user-space runtime for
+ applications designed for the old-world LoongArch ABI (Loongnix, UOS,
+ etc.).  This package ships a patched GNU C Library built for the
+ old-world ABI, installed below /usr/lib/loongarch64-debian-linux-gnuow/
+ so that the old-world dynamic loader can pick it up.
+ .
+ The la_ow_syscall kernel module (packaged separately, e.g. as
+ liblol-dkms) is required for old-world system call compatibility.
